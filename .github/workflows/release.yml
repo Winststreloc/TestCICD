@@ -1,0 +1,100 @@
+name: Release Version Bump
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  release:
+    name: Bump release version and publish
+    runs-on: ubuntu-latest
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Determine bump type from PR labels
+        id: bump_type
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Find the merged PR by the current commit SHA
+          PR_NUMBER=$(gh pr list \
+            --state merged \
+            --base main \
+            --json number,mergeCommit \
+            --jq ".[] | select(.mergeCommit.oid == \"$GITHUB_SHA\") | .number" 2>/dev/null || true)
+
+          BUMP="patch"
+
+          if [ -n "$PR_NUMBER" ]; then
+            LABELS=$(gh pr view "$PR_NUMBER" --json labels --jq '[.labels[].name] | join(" ")' 2>/dev/null || true)
+            echo "PR #$PR_NUMBER labels: $LABELS"
+
+            if echo "$LABELS" | grep -qw "major"; then
+              BUMP="major"
+            elif echo "$LABELS" | grep -qw "minor"; then
+              BUMP="minor"
+            else
+              BUMP="patch"
+            fi
+          else
+            echo "No associated PR found — defaulting to patch"
+          fi
+
+          echo "bump_type=$BUMP" >> $GITHUB_OUTPUT
+          echo "Determined bump type: $BUMP"
+
+      - name: Read and bump version
+        id: version
+        run: |
+          MAJOR=$(grep -oP '(?<=<VersionMajor>)\d+' Directory.Build.props)
+          MINOR=$(grep -oP '(?<=<VersionMinor>)\d+' Directory.Build.props)
+          PATCH=$(grep -oP '(?<=<VersionPatch>)\d+' Directory.Build.props)
+          BUMP="${{ steps.bump_type.outputs.bump_type }}"
+
+          case "$BUMP" in
+            major)
+              NEW_MAJOR=$((MAJOR + 1)); NEW_MINOR=0; NEW_PATCH=0 ;;
+            minor)
+              NEW_MAJOR=$MAJOR; NEW_MINOR=$((MINOR + 1)); NEW_PATCH=0 ;;
+            patch)
+              NEW_MAJOR=$MAJOR; NEW_MINOR=$MINOR; NEW_PATCH=$((PATCH + 1)) ;;
+          esac
+
+          sed -i "s|<VersionMajor>$MAJOR</VersionMajor>|<VersionMajor>$NEW_MAJOR</VersionMajor>|" Directory.Build.props
+          sed -i "s|<VersionMinor>$MINOR</VersionMinor>|<VersionMinor>$NEW_MINOR</VersionMinor>|" Directory.Build.props
+          sed -i "s|<VersionPatch>$PATCH</VersionPatch>|<VersionPatch>$NEW_PATCH</VersionPatch>|" Directory.Build.props
+          sed -i "s|<VersionBuild>[0-9]*</VersionBuild>|<VersionBuild>0</VersionBuild>|" Directory.Build.props
+
+          NEW_VERSION="$NEW_MAJOR.$NEW_MINOR.$NEW_PATCH.0"
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $MAJOR.$MINOR.$PATCH.x → $NEW_VERSION"
+
+      - name: Build project
+        run: dotnet build --configuration Release
+
+      - name: Commit, tag, and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Directory.Build.props
+          git commit -m "chore: release v${{ steps.version.outputs.new_version }} [skip ci]"
+          git tag "v${{ steps.version.outputs.new_version }}"
+          git push
+          git push --tags
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v${{ steps.version.outputs.new_version }}" \
+            --title "v${{ steps.version.outputs.new_version }}" \
+            --generate-notes

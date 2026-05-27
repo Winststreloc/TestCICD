@@ -1,0 +1,73 @@
+name: Bump Build Version
+
+on:
+  push:
+    branches:
+      - dev
+
+jobs:
+  bump-build:
+    name: Bump build version on feature merge
+    runs-on: ubuntu-latest
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 2
+
+      - name: Check if merge from feature branch
+        id: check
+        run: |
+          PARENTS=$(git log -1 --format="%P" HEAD | wc -w)
+          if [ "$PARENTS" -lt "2" ]; then
+            echo "Not a merge commit — skipping version bump"
+            echo "should_bump=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          MSG=$(git log -1 --format="%s" HEAD)
+          echo "Commit message: $MSG"
+
+          if echo "$MSG" | grep -qiE "(feature|bugfix|hotfix|task)/"; then
+            echo "should_bump=true" >> $GITHUB_OUTPUT
+          else
+            echo "Merged branch is not a versioned branch — skipping"
+            echo "should_bump=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Read version
+        if: steps.check.outputs.should_bump == 'true'
+        id: ver
+        run: |
+          echo "major=$(grep -oP '(?<=<VersionMajor>)\d+' Directory.Build.props)" >> $GITHUB_OUTPUT
+          echo "minor=$(grep -oP '(?<=<VersionMinor>)\d+' Directory.Build.props)" >> $GITHUB_OUTPUT
+          echo "patch=$(grep -oP '(?<=<VersionPatch>)\d+' Directory.Build.props)" >> $GITHUB_OUTPUT
+          echo "build=$(grep -oP '(?<=<VersionBuild>)\d+' Directory.Build.props)" >> $GITHUB_OUTPUT
+
+      - name: Bump build number
+        if: steps.check.outputs.should_bump == 'true'
+        id: bump
+        run: |
+          OLD=${{ steps.ver.outputs.build }}
+          NEW=$((OLD + 1))
+          sed -i "s|<VersionBuild>$OLD</VersionBuild>|<VersionBuild>$NEW</VersionBuild>|" Directory.Build.props
+          echo "new_version=${{ steps.ver.outputs.major }}.${{ steps.ver.outputs.minor }}.${{ steps.ver.outputs.patch }}.$NEW" >> $GITHUB_OUTPUT
+          echo "Bumped: ${{ steps.ver.outputs.major }}.${{ steps.ver.outputs.minor }}.${{ steps.ver.outputs.patch }}.$OLD → ${{ steps.ver.outputs.major }}.${{ steps.ver.outputs.minor }}.${{ steps.ver.outputs.patch }}.$NEW"
+
+      - name: Build project
+        if: steps.check.outputs.should_bump == 'true'
+        run: dotnet build --configuration Release
+
+      - name: Commit and push
+        if: steps.check.outputs.should_bump == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Directory.Build.props
+          git commit -m "chore: bump build version to ${{ steps.bump.outputs.new_version }} [skip ci]"
+          git push
